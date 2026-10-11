@@ -2,7 +2,9 @@
 
 `sept-ag` is an experimental bridge for connecting MCP clients and servers over [SEPT](https://github.com/fcavallarin/sept).
 
-It uses SEPT as the transport layer between agents and MCP servers, providing encrypted connectivity without exposing the MCP server publicly and allowing per-tool authorization through SEPT ACLs.
+It enables secure MCP communication across different networks without VPNs or publicly exposed endpoints, with fine-grained, per-client and per-tool authorization enforced through SEPT ACLs.
+
+An administrator can grant or revoke access to individual MCP tools without modifying the MCP server or its configuration.
 
 ## Current scope
 
@@ -21,10 +23,197 @@ Prompts, resources, and MCP notifications are intentionally out of scope for the
 A client can initially connect with no tools available. An administrator can then grant access to a specific MCP tool:
 
 ```bash
-sept-ag admin grant-tool cloud-agent get_door_state
+node src/cli.js admin grant-tool my-connection get_door_state
 ```
 
-After the grant, the MCP client can discover and call that tool. Revoking the grant removes access again.
+After the grant, the MCP client can discover and call that tool. Revoking the grant prevents further calls, even if the agent still has the tool in its previously discovered tool list.
+
+## Quick Start
+
+This guide shows how to connect an MCP client to a remote MCP server through SEPT and control access to individual tools.
+
+We'll use three components:
+
+- **Server** — Connects to an existing MCP server and exposes its tools over SEPT.
+- **Client** — Exposes authorized remote tools through a local MCP endpoint.
+- **Admin** — Pairs the devices and manages per-tool permissions.
+
+The client and server can run on different networks, without a VPN or publicly exposed MCP endpoint.
+
+### 1. Installation
+
+On each machine running SEPT-AG:
+
+```bash
+git clone https://github.com/fcavallarin/sept-ag.git
+cd sept-ag
+npm install
+```
+
+### 2. Configure the server
+
+On the machine hosting the MCP server, create a `config.json`:
+
+```json
+{
+  "server": {
+    "id": "my-server",
+    "transport": "streamable-http",
+    "url": "http://localhost:8931/mcp"
+  }
+}
+```
+
+Replace the URL with the endpoint of your existing MCP server. Make sure that the MCP server is running and reachable locally.
+
+Start SEPT-AG:
+
+```bash
+node src/cli.js server
+```
+
+On its first run, the server displays Base64-encoded pairing data and asks for a pairing PIN.
+
+Keep this terminal running. You'll complete pairing from the Admin in step 4.
+
+### 3. Configure the client
+
+On the machine where your AI agent runs, create a `config.json`:
+
+```json
+{
+  "client": {
+    "id": "my-agent",
+    "listenHost": "127.0.0.1",
+    "port": 8001
+  }
+}
+```
+
+Start the client:
+
+```bash
+node src/cli.js client
+```
+
+Like the server, the client displays pairing data on its first run and asks for a PIN.
+
+Keep this terminal running as well.
+
+**Note:** The examples assume the server, client, and Admin each run from a separate working directory with their own `config.json`. If you run all three on the same machine, use separate copies/directories so their configurations don't overwrite one another.
+
+### 4. Connect the client and server
+
+On a third terminal, create a connection using the pairing data printed by the client and server:
+
+```bash
+node src/cli.js admin connect my-connection \
+  "<CLIENT_PAIRING_DATA>" \
+  --new-server "<SERVER_PAIRING_DATA>"
+```
+
+The Admin initializes its own SEPT network if necessary, then generates pairing PINs for both devices.
+
+Enter the corresponding PIN in each device's terminal.
+
+Once pairing is complete, the Admin establishes the permissions required for MCP communication.
+
+**No MCP tools are granted by default.**
+
+### 5. Grant access to a tool
+
+Inspect the connection and its available tools:
+
+```bash
+node src/cli.js admin connection my-connection
+```
+
+Grant access to a specific tool:
+
+```bash
+node src/cli.js admin grant-tool my-connection get_door_state
+```
+
+Replace `get_door_state` with the name of a tool exposed by your MCP server.
+
+Alternatively, grant access to all available tools:
+
+```bash
+node src/cli.js admin grant-all my-connection
+```
+
+Permissions are enforced by SEPT, independently of the MCP server's own authorization mechanisms.
+
+### 6. Connect your AI agent
+
+The SEPT-AG client exposes a local MCP endpoint:
+
+```text
+http://127.0.0.1:8001/mcp
+```
+
+Configure your MCP-compatible agent to use this endpoint with the Streamable HTTP transport.
+
+The agent can discover and invoke only the tools authorized for its SEPT device.
+
+Tool calls are forwarded through the encrypted SEPT connection to the remote MCP server, and responses are delivered back to the agent.
+
+### 7. Revoke access
+
+Revoke permission to a specific tool:
+
+```bash
+node src/cli.js admin revoke-tool my-connection get_door_state
+```
+
+Or revoke all tool permissions:
+
+```bash
+node src/cli.js admin revoke-all my-connection
+```
+
+You can inspect the connection again:
+
+```bash
+node src/cli.js admin connection my-connection
+```
+
+Revocation prevents subsequent tool calls, even if an agent still has the tool in its cached tool list. The client may need to refresh its MCP tool list to reflect updated permissions in discovery results.
+
+## SEPT Relay
+
+By default, `sept-ag` uses a free, public SEPT relay. You can also [self-host your own](https://github.com/fcavallarin/sept/blob/main/docs/self-hosting.md).
+
+To point `sept-ag` to a different relay, add the following section to each component's `config.json` (inside the top-level JSON object):
+
+```json
+"sept": {
+  "restEndpoint": "https://YOUR-SEPT-RELAY"
+}
+```
+
+## How it works
+
+```text
+AI Agent
+   |
+   | MCP (localhost)
+   v
+SEPT-AG Client
+   |
+   | SEPT (E2E encrypted)
+   | Per-tool ACL
+   v
+SEPT-AG Server
+   |
+   | MCP (local)
+   v
+MCP Server
+```
+
+The SEPT relay forwards encrypted events without needing access to their contents. Each client has its own cryptographic identity, and the Admin controls which tools it may invoke.
+
+No inbound ports, VPN connections, or public MCP endpoints are required between the client and server.
 
 ## Status
 
