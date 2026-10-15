@@ -169,7 +169,7 @@ export class SeptMcpServer extends BaseCommand {
 
         try {
           const gatewayDeviceId = await this.sept.getDeviceId();
-          const graph = await this.sept.getDeviceGraph();
+          const graph = await this.sept.getACL();
 
           const relation = graph.find(edge =>
             edge.srcDeviceId === event.senderDeviceId &&

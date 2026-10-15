@@ -29,81 +29,24 @@ import {
   runMCPServer,
   runMCPClient,
   assert,
-  waitFor
+  waitFor,
+  writeConfig
 } from './common.js'
 
-let septServer, appClient, appServer, mcpServer, mcpClient
+let septServer, appClient, appClient2, appServer, mcpServer, mcpClient, dataDir, mcpClient2
 const serverOutput = []
-
-
-
-// class TestApp {
-
-//   // answers 
-
-//   constructor(app) {
-
-//     this.app = new app(new Command())
-//     this.stdout = []
-//     this.stderr = []
-
-//     this.app.command.configureOutput({
-//       writeOut: str => this.stdout.push(str),
-//       writeErr: str => this.stderr.push(str)
-//     });
-
-//     this.app.command.exitOverride();
-
-//     mock.module("node:readline/promises", {
-//       namedExports: {
-//         createInterface: () => ({
-//           question: async () => "1234",
-//           close: () => { }
-//         })
-//       }
-//     });
-//   }
-
-//   clear() {
-//     this.stdout = []
-//     this.stderr = []
-//   }
-
-//   async exec(...cmd) {
-//     await this.app.command.parseAsync(cmd, { from: "user" });
-//   }
-// }
 
 
 class SeptAGTest {
   async init() {
-    const dataDir = path.resolve(__dirname, "data")
+    dataDir = path.resolve(__dirname, "data")
     const serverDir = path.resolve(dataDir, "test-server")
     await rm(dataDir, { recursive: true, force: true });
     await mkdir(dataDir, { recursive: true });
 
     mcpServer = await runMCPServer()
 
-    fs.writeFileSync(
-      path.resolve(dataDir, "config.json"),
-      JSON.stringify({
-        "sept": {
-          "restEndpoint": `http://127.0.0.1:${SERVER_PORT}`,
-          "logLevel": "info"
-        },
-        "client": {
-          "id": "cl",
-          "listenHost": "127.0.0.1",
-          "port": PROXY_PORT
-        },
-        "server": {
-          "id": "serv",
-          "transport": "streamable-http",
-          "url": `http://127.0.0.1:${MCP_SERVER_PORT}/mcp`,
-        }
-      }),
-      "utf-8"
-    )
+    writeConfig(path.resolve(dataDir, "config.json"))
 
     execFileSync("git", [
       "clone", "--branch", `v${SEPT_VERSION}`, '--depth', '1', 'https://github.com/fcavallarin/sept.git'
@@ -180,15 +123,54 @@ class SeptAGTest {
     assert(res.tools.length === 0, "Tools list must be empty")
     const admin = run("admin", "grant-all", "my-connection")
     await admin.done
-    // grant-all returns once the policy update is on the relay; the client
-    // applies it asynchronously, so poll instead of asserting right away.
+
     res = await waitFor(async () => {
       const r = await mcpClient.listTools()
       return r.tools.length > 0 && r
     }, 10000, "granted tools to appear")
     assert(res.tools.length === 1, `Tools list must NOT be empty: ${res.tools.length}`)
     assert(res.tools[0].name === "tool-1", `Wrong tool name ${res.tools[0].name}`)
+  }
 
+  async test_existing_server(testId) {
+    let res
+    writeConfig(path.resolve(dataDir, "config2.json"), 1)
+    appClient2 = run("client", "--config", "./data/config2.json")
+
+    let clData = await appClient2.wait(/^eyJk/)
+    let admin = run("admin", "connection", "my-connection")
+    const serverId = (await admin.wait(/Server\: /)).split(": ")[1]
+    await admin.done
+    console.log(`Server ID: ${serverId}`)
+    admin = run("admin", "connect", "my-connection2", clData, "--existing-server", serverId)
+
+    const pinClient = (await admin.wait(/PIN Client/)).split(": ")[1]
+
+    await appClient2.wait(/PIN/)
+    await appClient2.send(pinClient)
+
+    await appClient2.wait(/Pairing done/)
+    console.log("Pairing done")
+    await appClient2.wait(/MCP proxy listening on/)
+
+    mcpClient2 = await runMCPClient(1)
+
+    res = await mcpClient2.listTools()
+    assert(res.tools.length === 0, "Tools list must be empty")
+
+    admin = run("admin", "grant-tool", "my-connection2", "tool-1")
+    await admin.done
+
+    admin = run("admin", "connection", "my-connection2")
+    await admin.wait(/tool\-1/)
+    await admin.done
+
+    res = await waitFor(async () => {
+      const r = await mcpClient2.listTools()
+      return r.tools.length > 0 && r
+    }, 10000, "granted tools to appear")
+    assert(res.tools.length === 1, `Tools list must NOT be empty: ${res.tools.length}`)
+    assert(res.tools[0].name === "tool-1", `Wrong tool name ${res.tools[0].name}`)
   }
 
 }
@@ -209,6 +191,12 @@ async function main() {
       mcpClient.close()
     }
     mcpServer.close()
+    if (mcpClient2) {
+      mcpClient2.close()
+    }
+    if (appClient2) {
+      appClient2.close()
+    }
     if (errors.length > 0) {
       for (const e of errors) {
         console.log(e)

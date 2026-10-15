@@ -114,20 +114,32 @@ export class SeptMcpClient extends BaseCommand {
       void nodeHandler(req, res, req.body)
     })
 
-    this.httpServer = app.listen(
-      this.service.port,
-      this.service.listenHost,
-      () => {
-        console.log(
-          `[${this.service.id}] MCP proxy listening on http://${this.service.listenHost}:${this.service.port}/mcp`
+    const { port, listenHost } = this.service
+
+    // Express 5 invokes the listen callback with the error too (e.g.
+    // EADDRINUSE), so check it instead of always reporting success.
+    try {
+      this.httpServer = await new Promise((resolve, reject) => {
+        const server = app.listen(port, listenHost, error =>
+          error ? reject(error) : resolve(server)
         )
-      }
+      })
+    } catch (error) {
+      console.error(
+        `[${this.service.id}] Cannot listen on ${listenHost}:${port}: ${error.message}`
+      )
+      // The SEPT connection would otherwise keep the process alive.
+      process.exit(1)
+    }
+
+    console.log(
+      `[${this.service.id}] MCP proxy listening on http://${listenHost}:${port}/mcp`
     )
   }
 
   async discoverGateway() {
     const ownDeviceId = await this.sept.getDeviceId()
-    const graph = await this.sept.getDeviceGraph()
+    const graph = await this.sept.getACL()
 
     const relations = graph.filter(edge => {
       if (edge.srcDeviceId !== ownDeviceId) {

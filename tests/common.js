@@ -24,10 +24,10 @@ export const __filename = fileURLToPath(import.meta.url);
 export const __dirname = path.dirname(__filename);
 
 export const SERVER_PORT = 18788
-export const MCP_SERVER_PORT = 1213
+export const MCP_SERVER_PORT = 1215
 export const NUM_DEVICES = 4
 export const SEPT_VERSION = "0.1.2"
-export const PROXY_PORT = 1223
+export const PROXY_PORT = 1228
 
 
 export function assert(cond, err) {
@@ -40,8 +40,6 @@ export async function sleep(ms) {
   await new Promise(r => setTimeout(r, ms))
 }
 
-// Polls fn until it returns a truthy value (which is returned) or times out.
-// Use it instead of fixed sleeps: SEPT events propagate asynchronously.
 export async function waitFor(fn, timeoutMs = 10000, what = "condition") {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
@@ -54,7 +52,7 @@ export async function waitFor(fn, timeoutMs = 10000, what = "condition") {
   throw new Error(`Timeout waiting for ${what}`)
 }
 
-export const runMCPClient = async () => {
+export const runMCPClient = async (clientNumber = 0) => {
 
   const mcpClient = new Client(
     {
@@ -70,7 +68,7 @@ export const runMCPClient = async () => {
 
 
   const mcpTransport = new StreamableHTTPClientTransport(
-    new URL(`http://127.0.0.1:${PROXY_PORT}/mcp`),
+    new URL(`http://127.0.0.1:${PROXY_PORT + clientNumber}/mcp`),
   );
 
 
@@ -193,9 +191,11 @@ export const runCLI = (cmd, args, opts = {}) => {
     output: () => stdout,
     errors: () => stderr,
     close: () => proc.kill(),
+    clear: () => {
+      stdout.splice(0)
+      stderr.splice(0)
+    },
     done: new Promise(resolve => proc.on("close", resolve)),
-    // Fails (with the process' stderr) instead of hanging when the process
-    // dies or the expected output never shows up.
     wait: async (out, timeoutMs = 60000) => {
       const start = Date.now()
       while (true) {
@@ -222,10 +222,31 @@ export const run = (...args) => {
       path.resolve(__dirname, "..", "src", "cli.js"),
       ...args,
       "--data-dir", "./data",
-      "--config", "./data/config.json"
+      ...(!args.includes("--config") ? ["--config", "./data/config.json"] : [])
     ],
-    // Resolve ./data relative to tests/, whatever directory the suite is
-    // started from.
     { cwd: __dirname }
+  )
+}
+
+export const writeConfig = (location, clientNumber = 0) => {
+  fs.writeFileSync(
+    location,
+    JSON.stringify({
+      "sept": {
+        "restEndpoint": `http://127.0.0.1:${SERVER_PORT}`,
+        "logLevel": "info"
+      },
+      "client": {
+        "id": `cl${clientNumber}`,
+        "listenHost": "127.0.0.1",
+        "port": PROXY_PORT + clientNumber
+      },
+      "server": {
+        "id": "serv",
+        "transport": "streamable-http",
+        "url": `http://127.0.0.1:${MCP_SERVER_PORT}/mcp`,
+      }
+    }),
+    "utf-8"
   )
 }

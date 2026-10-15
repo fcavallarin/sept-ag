@@ -9,9 +9,9 @@ It provides:
 - **Cross-network connectivity** — Reach MCP servers on private networks without a VPN or inbound ports.
 - **Per-agent, per-tool permissions** — Grant or revoke individual tools without changing the MCP server's configuration or its own authorization rules.
 - **End-to-end encryption** — Tool calls and responses travel encrypted between endpoints, including when routed through a third-party relay.
-- **Offline delivery** — Calls sent while a remote endpoint is disconnected can still be delivered and executed after it reconnects, even if the agent's original request has timed out.
+- **Resilient delivery** — Calls are queued while a remote endpoint is briefly disconnected and executed when it reconnects, as long as the agent is still waiting for the result.
 
-Offline execution does not yet mean asynchronous MCP result handling: an agent might not receive a late response, although it can verify completion independently (for example, by polling or through an external webhook). Native task tracking and result retrieval are planned; see [Future Work](#future-work).
+Calls that reach the server after the agent has stopped waiting are dropped instead of executed late, so a tool never runs after the agent gave up on it, or twice when the agent retries (see [Request Expiry](#request-expiry)). Executing calls after the agent's timeout, with the result retrieved later, is planned; see [Future Work](#future-work).
 
 Under the hood, `sept-ag` uses [SEPT](https://github.com/fcavallarin/sept), an open-source encrypted event protocol that handles transport, device identities, access control, and offline delivery.
 
@@ -23,7 +23,7 @@ The prototype currently supports:
 - Tool discovery
 - Tool calls
 - Per-tool grant/revoke
-- One client connected to one MCP server
+- One or more agents connected to the same MCP server, each through its own connection (see [Multiple Agents](#multiple-agents))
 
 MCP prompts, resources, and notifications are intentionally out of scope for the first demo.
 
@@ -173,7 +173,57 @@ Inspect the connection again:
 node src/cli.js admin connection my-connection
 ```
 
-Revocation blocks subsequent calls even if the agent cached the old tool list. The agent may need to refresh tool discovery to reflect the change in its UI.
+Revocation blocks subsequent calls even if the agent cached the old tool list.
+
+Agents don't need to be restarted after a grant or revoke: the client bridge sends a `notifications/tools/list_changed` notification, and agents that listen for it refresh their tool list automatically. This requires an agent using the 2026-07-28 MCP protocol revision; agents on older revisions see the updated list the next time they reconnect or run tool discovery.
+
+## Multiple Agents
+
+Each agent gets its own connection, with its own tool permissions. There are two ways to connect a second agent to the same MCP server.
+
+**Shared server bridge.** Start a new client for the agent (with its own `id` and `port`), find the server's device ID, and connect the client to the existing bridge:
+
+```bash
+node src/cli.js admin connection my-connection    # prints "Server: <SERVER_DEVICE_ID>"
+
+node src/cli.js admin connect my-second-agent \
+  "<CLIENT_PAIRING_DATA>" \
+  --existing-server <SERVER_DEVICE_ID>
+```
+
+Permissions stay separate: granting or revoking a tool on `my-second-agent` does not affect `my-connection`. However, the bridge talks to the MCP server through **a single MCP session shared by all its connections**. If the MCP server keeps per-session state (for example a browser in a Playwright MCP server, open files, or a logged-in account), the agents share that state.
+
+**Dedicated server bridge.** For isolation, start another server bridge for the new agent (with its own `id`, pointing to the same MCP server URL) and connect it with `--new-server`, as in [step 4](#4-connect-the-client-and-server). Each bridge opens its own MCP session. This is the recommended setup when agents must not see each other's state.
+
+## Request Expiry
+
+A tool call is executed only while the agent is still waiting for its result. Each request carries the client's timeout, and the server bridge checks the request's age, based on the sender's signed timestamp, before invoking the tool. Requests that are too old are logged and dropped, without executing the tool:
+
+```text
+[my-server] Dropping mcp.tools.call.get_door_state <requestId> from <device>: expired (age 42s, window 30s)
+```
+
+This prevents a call queued while the server was offline from running long after the agent has moved on, and a retried call from running twice.
+
+The window can be tuned in `config.json`:
+
+```json
+{
+  "client": {
+    "requestTimeoutMs": 30000
+  },
+  "server": {
+    "maxRequestAgeMs": 60000,
+    "clockSkewMs": 5000
+  }
+}
+```
+
+- `client.requestTimeoutMs` — How long the client waits for a response (default: 30000). It is also sent with each request as its validity window.
+- `server.maxRequestAgeMs` — Upper bound on the window a client may request (default: 60000).
+- `server.clockSkewMs` — Tolerated clock difference between endpoints (default: 5000). It is also used as a safety margin: a call is executed only if it is younger than the window minus this value, so that the response can still reach the agent in time. Requests with a timestamp further in the future than this value are rejected as well.
+
+Keep the endpoints' clocks synchronized (for example with NTP). A clock difference larger than `clockSkewMs` causes valid requests to be dropped.
 
 ## How It Works
 
@@ -243,7 +293,7 @@ Merge this `sept` field into your existing server, client, or Admin configuratio
 
 ### Asynchronous MCP Tool Execution
 
-The transport already supports persistent offline delivery: a call can reach a disconnected endpoint when it comes back online. But standard MCP tool calls use a request/response model, so the originating agent may time out before the call is executed and may never receive its eventual result.
+The transport already supports persistent offline delivery: a call can reach a disconnected endpoint when it comes back online. But standard MCP tool calls use a request/response model, so the originating agent may time out before the call is executed and would never receive its eventual result. For this reason, the server bridge currently drops calls that arrive after the agent's timeout (see [Request Expiry](#request-expiry)).
 
 A future version could use the [MCP Tasks Extension](https://tasks.extensions.modelcontextprotocol.io/) to provide native asynchronous execution and result retrieval:
 
