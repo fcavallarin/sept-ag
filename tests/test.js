@@ -28,7 +28,8 @@ import {
   sleep,
   runMCPServer,
   runMCPClient,
-  assert
+  assert,
+  waitFor
 } from './common.js'
 
 let septServer, appClient, appServer, mcpServer, mcpClient
@@ -164,6 +165,9 @@ class SeptAGTest {
     await appClient.wait(/Pairing done/)
     console.log("Pairing done")
     await appClient.wait(/MCP proxy listening on/)
+    // Don't let the next admin command run concurrently with this one: they
+    // are the same device sharing admin.db.
+    await admin.done
 
     // await appServer.wait(/Discovered MCP tools: \[ 'tool 1' \]/)
     console.log("Starting MCP client")
@@ -176,7 +180,12 @@ class SeptAGTest {
     assert(res.tools.length === 0, "Tools list must be empty")
     const admin = run("admin", "grant-all", "my-connection")
     await admin.done
-    res = await mcpClient.listTools()
+    // grant-all returns once the policy update is on the relay; the client
+    // applies it asynchronously, so poll instead of asserting right away.
+    res = await waitFor(async () => {
+      const r = await mcpClient.listTools()
+      return r.tools.length > 0 && r
+    }, 10000, "granted tools to appear")
     assert(res.tools.length === 1, `Tools list must NOT be empty: ${res.tools.length}`)
     assert(res.tools[0].name === "tool-1", `Wrong tool name ${res.tools[0].name}`)
 
@@ -195,6 +204,7 @@ async function main() {
   const exit = () => {
     septServer.close()
     appClient.close()
+    appServer.close()
     if (mcpClient) {
       mcpClient.close()
     }

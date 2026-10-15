@@ -226,6 +226,9 @@ export class SeptMcpClient extends BaseCommand {
         eventType,
         {
           requestId,
+          // Lets the server drop the request once we've stopped waiting
+          // for it (e.g. delivered after the gateway was offline).
+          timeoutMs: this.service.requestTimeoutMs,
           ...payload,
         },
         [this.gatewayDeviceId]

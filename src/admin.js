@@ -16,6 +16,7 @@ import {
   betterSqliteDataStore,
   loadOrCreateSecret,
   pairIfNeeded,
+  sleep,
 } from "./common.js"
 
 import { BaseCommand } from "./base-command.js";
@@ -84,6 +85,10 @@ export class SeptAGAdmin extends BaseCommand {
     this.sept.register("tools.list", async event => {
       const connections = await this.connectionsStorage.all()
       const connection = connections.find(c => c.value.server === event.senderDeviceId)
+      if (!connection) {
+        console.warn(`tools.list from unknown server ${event.senderDeviceId}, ignored`)
+        return
+      }
       await this.connectionsStorage.set(connection.key, cur => {
         return {
           ...cur,
@@ -162,14 +167,37 @@ export class SeptAGAdmin extends BaseCommand {
     await this.sept.grant(connection.client, connection.server, [`mcp.tools.call.${tool}`])
   }
 
+  // The server reports its tools to admins only after pairing completes, so
+  // right after `connect` the list may not have reached this admin yet.
+  // Wait for it briefly instead of silently granting/revoking nothing.
+  async getConnectionWithTools(connectionName, timeoutMs = 10000) {
+    const start = Date.now()
+    while (true) {
+      const connection = await this.connectionsStorage.get(connectionName)
+      if (!connection) {
+        throw new Error(`Connection ${connectionName} not found`)
+      }
+      if (connection.tools.length > 0) {
+        return connection
+      }
+      if (Date.now() - start > timeoutMs) {
+        throw new Error(
+          `No tool list received yet for ${connectionName}: make sure the `
+          + `server bridge is running (it reports its tools to admins on start)`
+        )
+      }
+      await sleep(250)
+    }
+  }
+
   async grantAll(connectionName) {
-    const connection = await this.connectionsStorage.get(connectionName)
+    const connection = await this.getConnectionWithTools(connectionName)
     const tools = connection.tools.map(t => `mcp.tools.call.${t.name}`)
     await this.sept.grant(connection.client, connection.server, tools)
   }
 
   async revokeAll(connectionName) {
-    const connection = await this.connectionsStorage.get(connectionName)
+    const connection = await this.getConnectionWithTools(connectionName)
     const tools = connection.tools.map(t => `mcp.tools.call.${t.name}`)
     await this.sept.revoke(connection.client, connection.server, tools)
   }

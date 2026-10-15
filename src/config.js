@@ -20,6 +20,9 @@ export function loadConfig(options = {}) {
     },
     server: {
       id: fileConfig.server?.id ?? "server1",
+      maxRequestAgeMs: 60000,
+      // Tolerated clock difference between endpoints
+      clockSkewMs: 5000,
       ...fileConfig.server,
     },
   };

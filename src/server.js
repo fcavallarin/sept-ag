@@ -163,6 +163,10 @@ export class SeptMcpServer extends BaseCommand {
           return;
         }
 
+        if (this.isStale(event, "mcp.tools.list")) {
+          return;
+        }
+
         try {
           const gatewayDeviceId = await this.sept.getDeviceId();
           const graph = await this.sept.getDeviceGraph();
@@ -230,6 +234,10 @@ export class SeptMcpServer extends BaseCommand {
             return;
           }
 
+          if (this.isStale(event, eventType)) {
+            return;
+          }
+
           console.log(
             `[${this.service.id}] Calling ${tool.name}`,
             {
@@ -269,6 +277,37 @@ export class SeptMcpServer extends BaseCommand {
 
       console.log(`[${this.service.id}] Registered ${eventType}`);
     }
+  }
+
+  //  Returns true when a request must not be executed because the
+  //  client has already given up on it, or its timestamp is implausible.
+  isStale(event, eventType) {
+    const { maxRequestAgeMs, clockSkewMs } = this.service
+    const nowMs = Date.now()
+    const sentMs = event.timestamp * 1000
+    const ageMs = nowMs - sentMs
+
+    const requested = Number(event.payload?.timeoutMs)
+    const windowMs = Number.isFinite(requested) && requested > 0
+      ? Math.min(requested, maxRequestAgeMs)
+      : maxRequestAgeMs
+
+    let reason = null
+    if (-ageMs > clockSkewMs) {
+      reason = `timestamp ${Math.round(-ageMs / 1000)}s in the future`
+    } else if (ageMs > windowMs - clockSkewMs) {
+      reason = `expired (age ${Math.round(ageMs / 1000)}s, window ${Math.round(windowMs / 1000)}s)`
+    }
+
+    if (reason) {
+      console.warn(
+        `[${this.service.id}] Dropping ${eventType} ${event.payload?.requestId}`
+        + ` from ${event.senderDeviceId}: ${reason}`,
+      )
+      return true
+    }
+
+    return false
   }
 
 

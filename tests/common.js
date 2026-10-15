@@ -40,6 +40,20 @@ export async function sleep(ms) {
   await new Promise(r => setTimeout(r, ms))
 }
 
+// Polls fn until it returns a truthy value (which is returned) or times out.
+// Use it instead of fixed sleeps: SEPT events propagate asynchronously.
+export async function waitFor(fn, timeoutMs = 10000, what = "condition") {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    const r = await fn()
+    if (r) {
+      return r
+    }
+    await sleep(200)
+  }
+  throw new Error(`Timeout waiting for ${what}`)
+}
+
 export const runMCPClient = async () => {
 
   const mcpClient = new Client(
@@ -168,8 +182,11 @@ export const runCLI = (cmd, args, opts = {}) => {
   const stdout = [];
   const stderr = []
 
+  let exitCode = null
+
   proc.stdout.on("data", data => stdout.push(...`${data}`.split('\n')));
   proc.stderr.on("data", data => stderr.push(...`${data}`.split('\n')));
+  proc.on("exit", code => { exitCode = code ?? "signal" });
 
   return {
     send: text => proc.stdin.write(`${text}\n`),
@@ -177,12 +194,21 @@ export const runCLI = (cmd, args, opts = {}) => {
     errors: () => stderr,
     close: () => proc.kill(),
     done: new Promise(resolve => proc.on("close", resolve)),
-    wait: async out => {
+    // Fails (with the process' stderr) instead of hanging when the process
+    // dies or the expected output never shows up.
+    wait: async (out, timeoutMs = 60000) => {
+      const start = Date.now()
       while (true) {
         for (const o of stdout) {
           if (out.test(o)) {
             return o
           }
+        }
+        if (exitCode !== null) {
+          throw new Error(`Process exited (${exitCode}) before ${out}\n${stderr.join("\n")}`)
+        }
+        if (Date.now() - start > timeoutMs) {
+          throw new Error(`Timeout waiting for ${out}\n${stderr.join("\n")}`)
         }
         await sleep(300)
       }
@@ -193,10 +219,13 @@ export const runCLI = (cmd, args, opts = {}) => {
 export const run = (...args) => {
   return runCLI(process.execPath,
     [
-      path.resolve("..", "src", "cli.js"),
+      path.resolve(__dirname, "..", "src", "cli.js"),
       ...args,
       "--data-dir", "./data",
       "--config", "./data/config.json"
-    ]
+    ],
+    // Resolve ./data relative to tests/, whatever directory the suite is
+    // started from.
+    { cwd: __dirname }
   )
 }
