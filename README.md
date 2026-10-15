@@ -1,16 +1,23 @@
 # sept-ag
 
-`sept-ag` is an experimental bridge for connecting MCP clients and servers over [SEPT](https://github.com/fcavallarin/sept).
+**Secure remote MCP access without VPNs, public endpoints, or complex networking setups.**
 
-It enables secure MCP communication across different networks without VPNs or publicly exposed endpoints, with fine-grained, per-client and per-tool authorization enforced through SEPT ACLs.
+`sept-ag` is an experimental bridge that lets AI agents discover and invoke tools exposed by MCP servers on other networks, without exposing those servers to the internet.
 
-An administrator can grant or revoke access to individual MCP tools without modifying the MCP server or its configuration.
+It provides:
 
-SEPT's built-in offline delivery also enables **deferred tool execution**: if a remote MCP server is temporarily offline, tool calls can be delivered and executed when it reconnects, even if the original MCP request has already timed out. While the agent won't automatically receive late results, completion can be verified through other mechanisms, such as polling or external webhooks. Future support for asynchronous MCP tasks aims to provide native result retrieval and notifications (see [Future Work](#future-work)).
+- **Cross-network connectivity** — Reach MCP servers on private networks without a VPN or inbound ports.
+- **Per-agent, per-tool permissions** — Grant or revoke individual tools without changing the MCP server's configuration or its own authorization rules.
+- **End-to-end encryption** — Tool calls and responses travel encrypted between endpoints, including when routed through a third-party relay.
+- **Offline delivery** — Calls sent while a remote endpoint is disconnected can still be delivered and executed after it reconnects, even if the agent's original request has timed out.
 
-## Current scope
+Offline execution does not yet mean asynchronous MCP result handling: an agent might not receive a late response, although it can verify completion independently (for example, by polling or through an external webhook). Native task tracking and result retrieval are planned; see [Future Work](#future-work).
 
-The current prototype focuses on a deliberately small MCP subset:
+Under the hood, `sept-ag` uses [SEPT](https://github.com/fcavallarin/sept), an open-source encrypted event protocol that handles transport, device identities, access control, and offline delivery.
+
+## Current Scope
+
+The prototype currently supports:
 
 - MCP initialization
 - Tool discovery
@@ -18,33 +25,33 @@ The current prototype focuses on a deliberately small MCP subset:
 - Per-tool grant/revoke
 - One client connected to one MCP server
 
-Prompts, resources, and MCP notifications are intentionally out of scope for the first demo.
+MCP prompts, resources, and notifications are intentionally out of scope for the first demo.
 
 ## Example
 
-A client can initially connect with no tools available. An administrator can then grant access to a specific MCP tool:
+A newly connected client has no tools available by default. An administrator can grant access to one tool:
 
 ```bash
 node src/cli.js admin grant-tool my-connection get_door_state
 ```
 
-After the grant, the MCP client can discover and call that tool. Revoking the grant prevents further calls, even if the agent still has the tool in its previously discovered tool list.
+The client can then discover and invoke `get_door_state`. Revoking the permission prevents subsequent invocations, even if the agent still has the tool in a cached tool list.
 
 ## Quick Start
 
-This guide shows how to connect an MCP client to a remote MCP server through SEPT and control access to individual tools.
+Connect an AI agent to an MCP server on another network and manage exactly which tools it can use.
 
-We'll use three components:
+There are three components:
 
-- **Server** — Connects to an existing MCP server and exposes its tools over SEPT.
-- **Client** — Exposes authorized remote tools through a local MCP endpoint.
-- **Admin** — Pairs the devices and manages per-tool permissions.
+- **Server** — Runs alongside an existing MCP server and makes its tools reachable remotely.
+- **Client** — Presents authorized remote tools to an AI agent through a local MCP endpoint.
+- **Admin** — Pairs the endpoints and manages tool permissions.
 
-The client and server can run on different networks, without a VPN or publicly exposed MCP endpoint.
+These components can run on separate networks. No VPN or publicly exposed MCP endpoint is required.
 
 ### 1. Installation
 
-On each machine running SEPT-AG:
+On each machine running `sept-ag`:
 
 ```bash
 git clone https://github.com/fcavallarin/sept-ag.git
@@ -54,7 +61,7 @@ npm install
 
 ### 2. Configure the server
 
-On the machine hosting the MCP server, create a `config.json`:
+On the machine hosting your MCP server, create `config.json`:
 
 ```json
 {
@@ -66,21 +73,19 @@ On the machine hosting the MCP server, create a `config.json`:
 }
 ```
 
-Replace the URL with the endpoint of your existing MCP server. Make sure that the MCP server is running and reachable locally.
+Replace the URL with your MCP server's local endpoint and ensure that it is running.
 
-Start SEPT-AG:
+Start the bridge:
 
 ```bash
 node src/cli.js server
 ```
 
-On its first run, the server displays Base64-encoded pairing data and asks for a pairing PIN.
-
-Keep this terminal running. You'll complete pairing from the Admin in step 4.
+On its first run, it displays Base64-encoded pairing data and prompts for a pairing PIN. Leave the terminal running; pairing will be completed in step 4.
 
 ### 3. Configure the client
 
-On the machine where your AI agent runs, create a `config.json`:
+On the machine running your AI agent, create `config.json`:
 
 ```json
 {
@@ -92,21 +97,19 @@ On the machine where your AI agent runs, create a `config.json`:
 }
 ```
 
-Start the client:
+Start the local MCP bridge:
 
 ```bash
 node src/cli.js client
 ```
 
-Like the server, the client displays pairing data on its first run and asks for a PIN.
+On first run, it also displays pairing data and asks for a PIN. Leave this terminal running.
 
-Keep this terminal running as well.
-
-**Note:** The examples assume the server, client, and Admin each run from a separate working directory with their own `config.json`. If you run all three on the same machine, use separate copies/directories so their configurations don't overwrite one another.
+**Note:** The server, client, and Admin each need their own working directory and `config.json`. If you run all three on the same machine, use separate copies/directories to avoid conflicting configurations.
 
 ### 4. Connect the client and server
 
-On a third terminal, create a connection using the pairing data printed by the client and server:
+In a third terminal, connect them using the pairing data displayed by each endpoint:
 
 ```bash
 node src/cli.js admin connect my-connection \
@@ -114,13 +117,9 @@ node src/cli.js admin connect my-connection \
   --new-server "<SERVER_PAIRING_DATA>"
 ```
 
-The Admin initializes its own SEPT network if necessary, then generates pairing PINs for both devices.
+The Admin initializes the underlying private network if necessary and generates pairing PINs for both endpoints. Enter each PIN in the corresponding terminal.
 
-Enter the corresponding PIN in each device's terminal.
-
-Once pairing is complete, the Admin establishes the permissions required for MCP communication.
-
-**No MCP tools are granted by default.**
+Once pairing completes, the endpoints have the permissions needed to exchange MCP requests and responses. **No MCP tools are granted by default.**
 
 ### 5. Grant access to a tool
 
@@ -130,163 +129,139 @@ Inspect the connection and its available tools:
 node src/cli.js admin connection my-connection
 ```
 
-Grant access to a specific tool:
+Grant one tool:
 
 ```bash
 node src/cli.js admin grant-tool my-connection get_door_state
 ```
 
-Replace `get_door_state` with the name of a tool exposed by your MCP server.
-
-Alternatively, grant access to all available tools:
+Replace `get_door_state` with a tool exposed by your MCP server. To grant all available tools:
 
 ```bash
 node src/cli.js admin grant-all my-connection
 ```
 
-Permissions are enforced by SEPT, independently of the MCP server's own authorization mechanisms.
+Tool permissions are enforced by the bridge's underlying access-control layer, independently of the MCP server's own authorization mechanisms.
 
 ### 6. Connect your AI agent
 
-The SEPT-AG client exposes a local MCP endpoint:
+Configure your MCP-compatible agent to use this local Streamable HTTP endpoint:
 
 ```text
 http://127.0.0.1:8001/mcp
 ```
 
-Configure your MCP-compatible agent to use this endpoint with the Streamable HTTP transport.
-
-The agent can discover and invoke only the tools authorized for its SEPT device.
-
-Tool calls are forwarded through the encrypted SEPT connection to the remote MCP server, and responses are delivered back to the agent.
+The agent can discover and invoke only the tools permitted for its connection. Requests are encrypted and forwarded to the remote bridge, which invokes the local MCP server and returns its response.
 
 ### 7. Revoke access
 
-Revoke permission to a specific tool:
+Revoke access to one tool:
 
 ```bash
 node src/cli.js admin revoke-tool my-connection get_door_state
 ```
 
-Or revoke all tool permissions:
+Or revoke all tools:
 
 ```bash
 node src/cli.js admin revoke-all my-connection
 ```
 
-You can inspect the connection again:
+Inspect the connection again:
 
 ```bash
 node src/cli.js admin connection my-connection
 ```
 
-Revocation prevents subsequent tool calls, even if an agent still has the tool in its cached tool list. The client may need to refresh its MCP tool list to reflect updated permissions in discovery results.
+Revocation blocks subsequent calls even if the agent cached the old tool list. The agent may need to refresh tool discovery to reflect the change in its UI.
 
-
-## Remote Agent Interaction
-
-SEPT can also be used as a secure communication channel between users and AI agents, including through mobile applications.
-
-This enables users to interact with agents running on private networks without exposing public endpoints or requiring VPN access.
-
-Combined with SEPT-AG, this opens up an end-to-end architecture where users communicate with agents over SEPT, while agents securely access remote MCP tools through the same protocol.
-
-Both communication paths benefit from end-to-end encryption, device identities, and distributed access control.
-
-While SEPT already provides the underlying communication capabilities, user-to-agent chat integration is not currently part of SEPT-AG.
-
-```
-Mobile App / User
-        |
-        | SEPT (E2E encrypted)
-        | Chat / Commands
-        v
-     AI Agent
-        |
-        | MCP (localhost)
-        v
-  SEPT-AG Client
-        |
-        | SEPT (E2E encrypted)
-        | Per-tool ACL
-        v
-  SEPT-AG Server
-        |
-        | MCP (local)
-        v
-     MCP Server
-```
-
-## SEPT Relay
-
-By default, `sept-ag` uses a free, public SEPT relay. You can also [self-host your own](https://github.com/fcavallarin/sept/blob/main/docs/self-hosting.md).
-
-To point `sept-ag` to a different relay, add the following section to each component's `config.json` (inside the top-level JSON object):
-
-```json
-"sept": {
-  "restEndpoint": "https://YOUR-SEPT-RELAY"
-}
-```
-
-## How it works
+## How It Works
 
 ```text
 AI Agent
    |
    | MCP (localhost)
    v
-SEPT-AG Client
+Remote MCP Client Bridge
    |
-   | SEPT (E2E encrypted)
-   | Per-tool ACL
+   | Encrypted relay transport
+   | Per-agent, per-tool permissions
    v
-SEPT-AG Server
+Remote MCP Server Bridge
    |
    | MCP (local)
    v
 MCP Server
 ```
 
-The SEPT relay forwards encrypted events without needing access to their contents. Each client has its own cryptographic identity, and the Admin controls which tools it may invoke.
+The relay forwards encrypted messages without access to tool-call contents. Each endpoint has its own cryptographic identity, and an administrator controls which tools each client can invoke. No inbound ports, VPN connections, or public MCP endpoints are required between client and server.
 
-No inbound ports, VPN connections, or public MCP endpoints are required between the client and server.
+## Remote Agent Interaction
+
+The same encrypted communication infrastructure can also connect users directly to AI agents, including from mobile apps. This makes it possible to chat with an agent running on a private network while the agent accesses MCP tools hosted elsewhere.
+
+```text
+Mobile App / User
+        |
+        | Encrypted chat / commands
+        v
+     AI Agent
+        |
+        | MCP (localhost)
+        v
+  MCP Client Bridge
+        |
+        | Encrypted remote access
+        | Per-tool permissions
+        v
+  MCP Server Bridge
+        |
+        | MCP (local)
+        v
+     MCP Server
+```
+
+The underlying protocol already supports secure user-to-agent messaging. **Chat integration is not currently a feature of `sept-ag` itself.**
+
+## Relay Configuration
+
+By default, `sept-ag` uses a free public relay. You can also [self-host a relay](https://github.com/fcavallarin/sept/blob/main/docs/self-hosting.md).
+
+To use a different relay, add this field to the top-level object in each component's `config.json`:
+
+```json
+{
+  "sept": {
+    "restEndpoint": "https://YOUR-SEPT-RELAY"
+  }
+}
+```
+
+Merge this `sept` field into your existing server, client, or Admin configuration; don't replace the other fields.
 
 ## Future Work
 
 ### Asynchronous MCP Tool Execution
 
-SEPT already supports durable offline event delivery, allowing events to be stored and delivered when a disconnected device comes back online.
+The transport already supports persistent offline delivery: a call can reach a disconnected endpoint when it comes back online. But standard MCP tool calls use a request/response model, so the originating agent may time out before the call is executed and may never receive its eventual result.
 
-However, MCP tool calls typically follow a synchronous request/response model. If a remote MCP server is offline, the request may time out before the server becomes available, even though SEPT can still deliver it later.
+A future version could use the [MCP Tasks Extension](https://tasks.extensions.modelcontextprotocol.io/) to provide native asynchronous execution and result retrieval:
 
-A future version of SEPT-AG could bridge this gap by implementing the [MCP Tasks Extension](https://tasks.extensions.modelcontextprotocol.io/), enabling asynchronous and durable tool execution across disconnected networks.
+1. An agent invokes a remote tool.
+2. The client bridge persists a task and immediately returns a task identifier.
+3. The request is queued for delivery even if the remote endpoint is offline.
+4. On reconnection, the server bridge invokes the existing MCP server.
+5. The result is delivered back and associated with the task.
+6. The agent retrieves the result with `tasks/get` or receives an optional `notifications/tasks` update.
 
-The intended workflow would be:
+This requires persistent task state, request/result correlation, execution deduplication, expiration policies, and cancellation handling. **Existing MCP servers would not need to implement asynchronous execution**: the bridge could manage the task lifecycle while continuing to invoke ordinary MCP tools.
 
-1. An MCP client invokes a remote tool.
-2. SEPT-AG creates a persistent task and immediately returns a task identifier.
-3. The tool call is delivered through SEPT, even if the remote device is temporarily offline.
-4. When the server becomes available, SEPT-AG forwards the request to the underlying MCP server.
-5. The result is delivered back through SEPT and associated with the original task.
-6. The MCP client retrieves the result using `tasks/get` or receives an optional `notifications/tasks` update.
-
-This would require implementing task persistence, request/result correlation, execution deduplication, expiration policies, and cancellation handling.
-
-Importantly, **existing MCP servers would not need to support asynchronous execution themselves**. SEPT-AG would manage the task lifecycle transparently, while the underlying MCP server continues to handle ordinary tool calls.
-
-Agents supporting the MCP Tasks Extension could then submit operations without maintaining a continuous connection or waiting synchronously for the result.
-
-The goal is to enable **durable asynchronous MCP tool execution across disconnected networks**, combining SEPT's offline delivery with MCP's task lifecycle.
-
-This functionality is not yet implemented in SEPT-AG.
+This is planned work, **not a feature of the current prototype**.
 
 ## Status
 
-This project is currently an experimental prototype / demo and is not published on npm yet.
-
-SEPT itself is available as the `@sept-protocol/*` packages on npm.
+`sept-ag` is an experimental prototype/demo and is not yet published on npm.
 
 ## Related
 
-- [SEPT](https://github.com/fcavallarin/sept)
+- [SEPT](https://github.com/fcavallarin/sept) — underlying encrypted event transport and access-control protocol

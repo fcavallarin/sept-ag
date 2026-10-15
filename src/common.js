@@ -56,12 +56,10 @@ export async function pairIfNeeded(sept, name, role) {
   if (await sept.getNetworkId()) {
     return
   }
-
   const rl = readline.createInterface({
     input: stdin,
     output: stdout,
   })
-
   try {
     const deviceData = await sept.initDevice()
 
@@ -70,19 +68,15 @@ export async function pairIfNeeded(sept, name, role) {
       role
     }
 
-    console.log("Your pairing data:\n")
-
-    console.log(
-      Buffer
-        .from(JSON.stringify(deviceData))
-        .toString("base64")
-    )
-
+    const pairingData = Buffer.from(JSON.stringify(deviceData)).toString("base64")
     // qrcode.generate(JSON.stringify(deviceData), {
     //   small: true,
     // })
 
+    console.log("Your pairing data:\n")
+    console.log(pairingData)
     const pin = await rl.question("Pairing PIN: ")
+
 
     await sept.pairDevice(pin.trim())
   } finally {

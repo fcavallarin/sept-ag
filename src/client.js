@@ -41,6 +41,8 @@ export class SeptMcpClient extends BaseCommand {
     this.httpServer = null
     this.stopping = false
     this.tools = null
+    this.toolsRequest = null
+    this.toolsGeneration = 0
     let networkId = await this.sept.getNetworkId()
     if (!networkId) {
       await pairIfNeeded(
@@ -54,9 +56,9 @@ export class SeptMcpClient extends BaseCommand {
     console.log(`NetworkID: ${networkId}`)
     this.registerResponseHandler()
 
-    this.sept.on("policy.update", () => {
-      this.tools = null
-    })
+    this.sept.on("policy.update", ({ policies }) =>
+      this.onPolicyUpdate(policies)
+    )
 
     await this.sept.connect()
   }
@@ -242,23 +244,75 @@ export class SeptMcpClient extends BaseCommand {
     return responsePromise
   }
 
-  async buildMcpServer() {
-    if(this.tools === null){
-      const discovery = await this.request("mcp.tools.list")
-      this.tools = discovery?.tools ?? []
+  async onPolicyUpdate(policies = []) {
+    const ownDeviceId = await this.sept.getDeviceId()
+
+    const affectsTools = policies.some(p =>
+      p.srcDeviceId === ownDeviceId &&
+      (this.gatewayDeviceId === null || p.dstDeviceId === this.gatewayDeviceId)
+    )
+
+    if (!affectsTools) {
+      return
     }
+
+    // Bump the generation so an in-flight mcp.tools.list issued under the
+    // old policy cannot repopulate the cache with a stale list.
+    this.toolsGeneration++
+    this.tools = null
+    this.toolsRequest = null
+
+    this.mcpHandler?.notify.toolsChanged()
+    console.log(`[${this.service.id}] Tool permissions changed, notified agents`)
+  }
+
+  async getTools() {
+    if (this.tools !== null) {
+      return this.tools
+    }
+
+    if (this.toolsRequest === null) {
+      const generation = this.toolsGeneration
+
+      const request = this.request("mcp.tools.list")
+        .then(discovery => {
+          const tools = discovery?.tools ?? []
+          if (generation === this.toolsGeneration) {
+            this.tools = tools
+          }
+          return tools
+        })
+        .finally(() => {
+          if (this.toolsRequest === request) {
+            this.toolsRequest = null
+          }
+        })
+
+      this.toolsRequest = request
+    }
+
+    return this.toolsRequest
+  }
+
+  async buildMcpServer() {
+    const tools = await this.getTools()
 
     console.log(
       `[${this.service.id}] Allowed MCP tools:`,
-      this.tools.map(tool => tool.name)
+      tools.map(tool => tool.name)
     )
 
-    const server = new McpServer({
-      name: `SEPT MCP Proxy (${this.service.id})`,
-      version: "0.1.0",
-    })
+    const server = new McpServer(
+      {
+        name: `SEPT MCP Proxy (${this.service.id})`,
+        version: "0.1.0",
+      },
+      {
+        capabilities: { tools: { listChanged: true } },
+      }
+    )
 
-    for (const tool of this.tools) {
+    for (const tool of tools) {
       const toolConfig = {
         description: tool.description ?? "",
         inputSchema: fromJsonSchema(

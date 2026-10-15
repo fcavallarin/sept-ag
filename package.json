@@ -7,7 +7,7 @@
     "@modelcontextprotocol/express": "^2.0.1",
     "@modelcontextprotocol/node": "^2.1.0",
     "@modelcontextprotocol/server": "^2.1.0",
-    "@sept-protocol/client": "^0.1.0",
+    "@sept-protocol/client": "^0.1.2",
     "better-sqlite3": "^13.0.3",
     "commander": "^15.0.0",
     "express": "^5.2.1",
