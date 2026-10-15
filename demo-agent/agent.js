@@ -28,18 +28,31 @@ async function runAgent() {
   const transport = new StreamableHTTPClientTransport(new URL(MCP_URL));
   await mcp.connect(transport);
 
-  const availableTools = await mcp.listTools();
+  // Tool permissions can change at any time (grant/revoke), so the tool list
+  // is re-read before every LLM call instead of once at startup.
+  let llmTools = [];
+  let toolNames = null;
 
-  const llmTools = availableTools.tools.map(tool => ({
-    type: "function",
-    function: {
-      name: tool.name,
-      description: tool.description ?? "",
-      parameters: tool.inputSchema,
-    },
-  }));
+  async function refreshTools() {
+    const { tools } = await mcp.listTools();
+    const names = tools.map(tool => tool.name).join(", ");
 
-  console.log("MCP tools:", availableTools.tools.map(tool => tool.name).join(", "));
+    if (names !== toolNames) {
+      console.log(`MCP tools: ${names || "(none)"}`);
+      toolNames = names;
+    }
+
+    llmTools = tools.map(tool => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description ?? "",
+        parameters: tool.inputSchema,
+      },
+    }));
+  }
+
+  await refreshTools();
   console.log();
 
   const messages = [{
@@ -72,6 +85,8 @@ async function runAgent() {
       });
 
       while (true) {
+        await refreshTools();
+
         const response = await llm.chat.completions.create({
           model: OLLAMA_MODEL,
           messages,
@@ -95,14 +110,19 @@ async function runAgent() {
 
           console.log(`Calling ${toolName}:`, args);
 
-          const result = await mcp.callTool({
-            name: toolName,
-            arguments: args,
-          });
+          // A call can fail with a protocol error (e.g. "Tool X not found"
+          // right after a revoke): report it to the model instead of crashing.
+          let toolResult;
+          try {
+            const result = await mcp.callTool({
+              name: toolName,
+              arguments: args,
+            });
+            toolResult = resultToText(result);
+          } catch (error) {
+            toolResult = `Error: ${error.message}`;
+          }
 
-          console.log("call done");
-
-          const toolResult = resultToText(result);
           console.log(`MCP result: ${toolResult}`);
 
           messages.push({
