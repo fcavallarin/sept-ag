@@ -1,30 +1,16 @@
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { Option } from "commander";
 import {
   Client,
   StreamableHTTPClientTransport,
 } from "@modelcontextprotocol/client";
 
-import { SeptClient } from "@sept-protocol/client";
-
-import {
-  betterSqliteDataStore,
-  loadOrCreateSecret,
-  pairIfNeeded,
-} from "./common.js";
+import { pairIfNeeded } from "./common.js";
 import { BaseCommand } from "./base-command.js";
 
 export class SeptMcpServer extends BaseCommand {
 
   constructor(program) {
-    super("server", "", program)
+    super("server", "Run the server bridge in front of an existing MCP server", program)
     this.command
-      // .addOption(
-      //   new Option("-p, --protocol <protocol>", "service protocol")
-      //     .choices(["mcp", "a2a"])
-      //     .default("mcp"),
-      // )
       .action(this.action("start"))
   }
 
@@ -109,7 +95,7 @@ export class SeptMcpServer extends BaseCommand {
 
     this.mcpClient = new Client(
       {
-        name: `sept-ab-${this.service.id}`,
+        name: `sept-ag-${this.service.id}`,
         version: "0.1.0",
       },
       {

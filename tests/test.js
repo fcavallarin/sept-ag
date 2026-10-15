@@ -1,28 +1,12 @@
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { rm, mkdir, cp } from 'node:fs/promises';
-import { execFileSync, spawn } from "node:child_process";
-import fs from "node:fs"
-import { Command, Option } from "commander";
-import { SeptAGAdmin } from '../src/admin.js'
-import { SeptMcpClient } from '../src/client.js'
-import { mock } from "node:test";
-import {
-  createMcpHandler,
-  fromJsonSchema,
-  McpServer,
-} from "@modelcontextprotocol/server"
-import { toNodeHandler } from "@modelcontextprotocol/node"
-import { createMcpExpressApp } from "@modelcontextprotocol/express"
+import { execFileSync } from "node:child_process";
 
 import {
-  __filename,
   __dirname,
   SERVER_PORT,
-  MCP_SERVER_PORT,
   NUM_DEVICES,
   SEPT_VERSION,
-  PROXY_PORT,
   run,
   runCLI,
   sleep,
@@ -30,7 +14,9 @@ import {
   runMCPClient,
   assert,
   waitFor,
-  writeConfig
+  writeConfig,
+  toolCalls,
+  callTool
 } from './common.js'
 
 let septServer, appClient, appClient2, appServer, mcpServer, mcpClient, dataDir, mcpClient2
@@ -171,6 +157,60 @@ class SeptAGTest {
     }, 10000, "granted tools to appear")
     assert(res.tools.length === 1, `Tools list must NOT be empty: ${res.tools.length}`)
     assert(res.tools[0].name === "tool-1", `Wrong tool name ${res.tools[0].name}`)
+  }
+
+  async test_tool_call(testId) {
+    const before = toolCalls.length
+    const res = await callTool(mcpClient, "tool-1")
+    assert(res.ok, `Tool call failed: ${res.text}`)
+    assert(res.text === "tool-1 executed", `Unexpected result: ${res.text}`)
+    assert(toolCalls.length === before + 1, "Tool not executed on the MCP server")
+  }
+
+  // After a revoke the call must be blocked even though the agent still has
+  // tool-1 in its cached list (we never call listTools here).
+  async test_revoked_call(testId) {
+    const changed = () => appClient.output()
+      .filter(l => /Tool permissions changed/.test(l)).length
+    const changesBefore = changed()
+
+    const admin = run("admin", "revoke-tool", "my-connection", "tool-1")
+    await admin.done
+    await waitFor(() => changed() > changesBefore, 10000, "client to apply the revoke")
+
+    const before = toolCalls.length
+    const res = await callTool(mcpClient, "tool-1")
+    assert(!res.ok, `Revoked tool call succeeded: ${res.text}`)
+
+    // Give a (wrongly) delivered call time to show up before asserting.
+    await sleep(1000)
+    assert(toolCalls.length === before, "Revoked tool executed on the MCP server")
+  }
+
+  // A call made while the server bridge is offline must not be executed when
+  // the bridge comes back after the client's timeout (8s in writeConfig).
+  // Uses cl1 (my-connection2), which still has tool-1.
+  async test_stale_request(testId) {
+    appServer.close()
+    await appServer.done
+
+    const before = toolCalls.length
+    const res = await callTool(mcpClient2, "tool-1")
+    assert(!res.ok && /Timeout/.test(res.text), `Expected a timeout, got: ${res.text}`)
+
+    appServer = run("server")
+    await appServer.wait(/SEPT gateway connected/)
+    await waitFor(
+      () => appServer.errors().some(l => /Dropping mcp\.tools\.call\.tool-1 .*expired/.test(l)),
+      10000,
+      "server to drop the expired call"
+    )
+    assert(toolCalls.length === before, "Expired tool call executed on the MCP server")
+
+    // A fresh call goes through normally once the bridge is back.
+    const fresh = await callTool(mcpClient2, "tool-1")
+    assert(fresh.ok, `Fresh call after reconnect failed: ${fresh.text}`)
+    assert(toolCalls.length === before + 1, "Fresh call not executed")
   }
 
 }

@@ -1,30 +1,12 @@
-import crypto from "node:crypto"
-import { mkdirSync } from "node:fs"
 import pc from "picocolors"
-import { join } from "node:path"
-import { SeptClient } from "@sept-protocol/client"
 import { Option } from "commander";
-import {
-  createMcpHandler,
-  fromJsonSchema,
-  McpServer,
-} from "@modelcontextprotocol/server"
-import { toNodeHandler } from "@modelcontextprotocol/node"
-import { createMcpExpressApp } from "@modelcontextprotocol/express"
 
-import {
-  betterSqliteDataStore,
-  loadOrCreateSecret,
-  pairIfNeeded,
-  sleep,
-} from "./common.js"
-
+import { sleep } from "./common.js"
 import { BaseCommand } from "./base-command.js";
-import { error } from "node:console";
 
 export class SeptAGAdmin extends BaseCommand {
   constructor(program) {
-    super("admin", "Manage AgentBridge devices, services, and grants", program)
+    super("admin", "Manage connections and tool permissions", program)
     this.command
       .command("connect")
       .description("Add a new connection")
@@ -145,7 +127,7 @@ export class SeptAGAdmin extends BaseCommand {
     }
     await pairingClient
 
-    await this.sept.grant(client.deviceId, serverDeviceId, ["mcp.initialize", "mcp.tools.list"])
+    await this.sept.grant(client.deviceId, serverDeviceId, ["mcp.tools.list"])
     await this.sept.grant(serverDeviceId, client.deviceId, ["mcp.response"])
     await this.connectionsStorage.set(name, {
       name,

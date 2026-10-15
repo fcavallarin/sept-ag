@@ -1,8 +1,4 @@
 import crypto from "node:crypto"
-import { mkdirSync } from "node:fs"
-import { join } from "node:path"
-import { Option } from "commander";
-import { SeptClient } from "@sept-protocol/client"
 import {
   createMcpHandler,
   fromJsonSchema,
@@ -11,21 +7,12 @@ import {
 import { toNodeHandler } from "@modelcontextprotocol/node"
 import { createMcpExpressApp } from "@modelcontextprotocol/express"
 import { BaseCommand } from "./base-command.js"
-import {
-  betterSqliteDataStore,
-  loadOrCreateSecret,
-  pairIfNeeded,
-} from "./common.js"
+import { pairIfNeeded } from "./common.js"
 
 export class SeptMcpClient extends BaseCommand {
   constructor(program) {
-    super("client", "Client", program)
+    super("client", "Run the client bridge: a local MCP endpoint for an AI agent", program)
     this.command
-      .addOption(
-        new Option("-p, --protocol <protocol>", "service protocol")
-          .choices(["mcp", "a2a"])
-          .default("mcp"),
-      )
       .action(this.action("start"))
   }
 

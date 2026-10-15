@@ -1,12 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { rm, mkdir, cp } from 'node:fs/promises';
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs"
-import { Command, Option } from "commander";
-import { SeptAGAdmin } from '../src/admin.js'
-import { SeptMcpClient } from '../src/client.js'
-import { mock } from "node:test";
 import {
   createMcpHandler,
   fromJsonSchema,
@@ -56,7 +51,7 @@ export const runMCPClient = async (clientNumber = 0) => {
 
   const mcpClient = new Client(
     {
-      name: `sept-ab-test`,
+      name: `sept-ag-test`,
       version: "0.1.0",
     },
     {
@@ -78,6 +73,21 @@ export const runMCPClient = async (clientNumber = 0) => {
 
   return mcpClient
 
+}
+
+// Every execution of a tool on the fake MCP server, in order. Tests use it to
+// check whether a call actually reached the MCP server.
+export const toolCalls = []
+
+
+export async function callTool(mcpClient, name, args = {}) {
+  try {
+    const r = await mcpClient.callTool({ name, arguments: args })
+    const text = (r.content ?? []).map(c => c.text ?? "").join("\n")
+    return { ok: !r.isError, text }
+  } catch (e) {
+    return { ok: false, text: String(e?.message ?? e) }
+  }
 }
 
 export const runMCPServer = async () => {
@@ -123,18 +133,11 @@ export const runMCPServer = async () => {
         server.registerTool(
           tool.name,
           toolConfig,
-          async arguments_ => {
-            console.log(
-              `[${this.service.id}] Calling ${tool.name} over SEPT`,
-              arguments_
-            )
-
-            return this.request(
-              `mcp.tools.call.${tool.name}`,
-              {
-                arguments: arguments_,
-              }
-            )
+          async () => {
+            toolCalls.push({ name: tool.name, at: Date.now() })
+            return {
+              content: [{ type: "text", text: `${tool.name} executed` }],
+            }
           }
         )
 
@@ -239,12 +242,15 @@ export const writeConfig = (location, clientNumber = 0) => {
       "client": {
         "id": `cl${clientNumber}`,
         "listenHost": "127.0.0.1",
-        "port": PROXY_PORT + clientNumber
+        "port": PROXY_PORT + clientNumber,
+        // Short timeout so request-expiry tests don't take 30s+.
+        "requestTimeoutMs": 8000
       },
       "server": {
         "id": "serv",
         "transport": "streamable-http",
         "url": `http://127.0.0.1:${MCP_SERVER_PORT}/mcp`,
+        "clockSkewMs": 2000
       }
     }),
     "utf-8"

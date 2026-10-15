@@ -1,4 +1,3 @@
-import { promisify } from "node:util"
 import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { randomBytes } from "node:crypto"
 import Database from "better-sqlite3"
