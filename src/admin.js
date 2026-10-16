@@ -127,8 +127,10 @@ export class SeptAGAdmin extends BaseCommand {
     }
     await pairingClient
 
-    await this.sept.grant(client.deviceId, serverDeviceId, ["mcp.tools.list"])
-    await this.sept.grant(serverDeviceId, client.deviceId, ["mcp.response"])
+    // MCP messages flow both ways as mcp.rpc; each tool call additionally
+    // needs its own mcp.tools.call.<tool> grant (grant-tool / grant-all).
+    await this.sept.grant(client.deviceId, serverDeviceId, ["mcp.rpc"])
+    await this.sept.grant(serverDeviceId, client.deviceId, ["mcp.rpc"])
     await this.connectionsStorage.set(name, {
       name,
       server: serverDeviceId,
