@@ -65,7 +65,25 @@ export class SeptMcpChannel {
 
   async receive(eventType, event) {
     const { message, timeoutMs } = event.payload ?? {}
-    if (!message || typeof message !== "object") {
+    // A single JSON-RPC message: batches (arrays) could hide a tools/call.
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      console.warn(`${this.logPrefix}Dropping malformed ${eventType} from ${event.senderDeviceId}`)
+      return
+    }
+
+    if (message.method === "tools/call" && typeof message.params?.name !== "string") {
+      console.warn(`${this.logPrefix}Dropping tools/call without a tool name from ${event.senderDeviceId}`)
+      return
+    }
+
+    // SEPT authorized the event type, not its content: the message must be
+    // exactly what that event type stands for. Otherwise a tools/call could
+    // ride on mcp.rpc, or on another tool's grant.
+    if (eventTypeFor(message) !== eventType) {
+      console.warn(
+        `${this.logPrefix}Dropping ${eventType} from ${event.senderDeviceId}:`
+        + ` carries ${eventTypeFor(message)}`,
+      )
       return
     }
 
