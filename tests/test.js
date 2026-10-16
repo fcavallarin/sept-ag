@@ -213,6 +213,30 @@ class SeptAGTest {
     assert(toolCalls.length === before + 1, "Fresh call not executed")
   }
 
+  // The client bridge (and its agent) restarts while the server bridge keeps
+  // running: tools must still be listed and callable. Uses cl1 (my-connection2),
+  // which still has tool-1.
+  async test_client_restart(testId) {
+    mcpClient2.close()
+    appClient2.close()
+    await appClient2.done
+
+    appClient2 = run("client", "--config", "./data/config2.json")
+    await appClient2.wait(/MCP proxy listening on/)
+    mcpClient2 = await runMCPClient(1)
+
+    const res = await waitFor(async () => {
+      const r = await mcpClient2.listTools()
+      return r.tools.length > 0 && r
+    }, 10000, "tools to be listed after client restart")
+    assert(res.tools[0].name === "tool-1", `Wrong tool name ${res.tools[0].name}`)
+
+    const before = toolCalls.length
+    const call = await callTool(mcpClient2, "tool-1")
+    assert(call.ok, `Tool call after client restart failed: ${call.text}`)
+    assert(toolCalls.length === before + 1, "Tool not executed after client restart")
+  }
+
 }
 
 async function main() {
