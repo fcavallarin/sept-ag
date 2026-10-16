@@ -2,8 +2,10 @@ import {
   Client,
   StreamableHTTPClientTransport,
 } from "@modelcontextprotocol/client";
+import { fromJsonSchema, McpServer } from "@modelcontextprotocol/server";
 
 import { pairIfNeeded } from "./common.js";
+import { SeptMcpChannel, toolCallEvent } from "./transport.js";
 import { BaseCommand } from "./base-command.js";
 
 export class SeptMcpServer extends BaseCommand {
@@ -40,8 +42,7 @@ export class SeptMcpServer extends BaseCommand {
     const { tools } = await this.mcpClient.listTools();
 
     this.tools = tools;
-    this.registerMcpTools();
-    this.registerToolsList()
+    this.setupMcpChannel()
 
     await this.sept.connect()
   }
@@ -132,199 +133,119 @@ export class SeptMcpServer extends BaseCommand {
   }
 
 
-  registerToolsList() {
+  setupMcpChannel() {
+    // One MCP session (McpServer + SeptTransport) per client device.
+    this.sessions = new Map()
+    this.channel = new SeptMcpChannel(this.sept, {
+      logPrefix: `[${this.service.id}] `,
+      maxRequestAgeMs: this.service.maxRequestAgeMs,
+      clockSkewMs: this.service.clockSkewMs,
+    })
+    this.channel.registerTools(this.tools.map(tool => tool.name))
+    this.channel.onsession = transport => this.createSession(transport)
 
-    this.sept.register(
-      "mcp.tools.list",
-
-      async event => {
-
-        const requestId = event.payload?.requestId;
-
-        if (!requestId) {
-          console.error(
-            `[${this.service.id}] mcp.tools.list: missing requestId`,
-          );
-
-          return;
-        }
-
-        if (this.isStale(event, "mcp.tools.list")) {
-          return;
-        }
-
-        try {
-          const gatewayDeviceId = await this.sept.getDeviceId();
-          const graph = await this.sept.getACL();
-
-          const relation = graph.find(edge =>
-            edge.srcDeviceId === event.senderDeviceId &&
-            edge.dstDeviceId === gatewayDeviceId
-          );
-
-          const allowedEventTypes = relation?.policy?.allowedEventTypes ?? [];
-          const allowedTools = this.tools.filter(tool =>
-            allowedEventTypes.includes(
-              `mcp.tools.call.${tool.name}`,
-            )
-          );
-
-          console.log(
-            `[${this.service.id}] tools/list for ${event.senderDeviceId}:`,
-            allowedTools.map(tool => tool.name),
-          );
-
-          await this.sendResult(
-            event,
-            requestId,
-            {
-              tools: allowedTools,
-            },
-          );
-
-        } catch (error) {
-          console.error(
-            `[${this.service.id}] mcp.tools.list failed:`,
-            error,
-          );
-
-          await this.sendError(
-            event,
-            requestId,
-            error,
-          );
-        }
-      },
-    );
-
-    console.log(`[${this.service.id}] Registered mcp.tools.list`);
+    this.sept.on("policy.update", () => this.applyGrantsToSessions())
   }
 
+  // Exposes the MCP server's tools to one client device. Every tool is
+  // registered, but only the ones granted to the device are enabled: SEPT
+  // already drops calls to tools that are not granted, this keeps tools/list
+  // consistent with the grants.
+  async createSession(transport) {
+    const deviceId = transport.deviceId
 
-  registerMcpTools() {
+    const server = new McpServer(
+      {
+        name: `sept-ag-${this.service.id}`,
+        version: "0.1.0",
+      },
+      {
+        capabilities: { tools: { listChanged: true } },
+      },
+    )
+
+    const registered = new Map()
     for (const tool of this.tools) {
-
-      const eventType = `mcp.tools.call.${tool.name}`;
-
-      this.sept.register(
-        eventType,
-        async event => {
-          const {
-            requestId,
-            arguments: arguments_ = {},
-            mcpRequestId,
-          } = event.payload;
-
-          if (!requestId) {
-            console.error(`[${this.service.id}] ${eventType}: missing requestId`);
-            return;
-          }
-
-          if (this.isStale(event, eventType)) {
-            return;
-          }
-
-          console.log(
-            `[${this.service.id}] Calling ${tool.name}`,
-            {
-              requestId,
-              mcpRequestId,
-              senderDeviceId: event.senderDeviceId,
-              arguments: arguments_,
-            },
-          );
-
-          try {
-            const result = await this.mcpClient.callTool({
-              name: tool.name,
-              arguments: arguments_,
-            });
-
-            await this.sendResult(
-              event,
-              requestId,
-              result,
-            );
-
-          } catch (error) {
-            console.error(
-              `[${this.service.id}] ${eventType} failed:`,
-              error,
-            );
-
-            await this.sendError(
-              event,
-              requestId,
-              error,
-            );
-          }
-        }
-      );
-
-      console.log(`[${this.service.id}] Registered ${eventType}`);
-    }
-  }
-
-  //  Returns true when a request must not be executed because the
-  //  client has already given up on it, or its timestamp is implausible.
-  isStale(event, eventType) {
-    const { maxRequestAgeMs, clockSkewMs } = this.service
-    const nowMs = Date.now()
-    const sentMs = event.timestamp * 1000
-    const ageMs = nowMs - sentMs
-
-    const requested = Number(event.payload?.timeoutMs)
-    const windowMs = Number.isFinite(requested) && requested > 0
-      ? Math.min(requested, maxRequestAgeMs)
-      : maxRequestAgeMs
-
-    let reason = null
-    if (-ageMs > clockSkewMs) {
-      reason = `timestamp ${Math.round(-ageMs / 1000)}s in the future`
-    } else if (ageMs > windowMs - clockSkewMs) {
-      reason = `expired (age ${Math.round(ageMs / 1000)}s, window ${Math.round(windowMs / 1000)}s)`
-    }
-
-    if (reason) {
-      console.warn(
-        `[${this.service.id}] Dropping ${eventType} ${event.payload?.requestId}`
-        + ` from ${event.senderDeviceId}: ${reason}`,
+      registered.set(
+        tool.name,
+        server.registerTool(
+          tool.name,
+          toolConfig(tool),
+          async arguments_ => this.callTool(tool, deviceId, arguments_),
+        ),
       )
-      return true
     }
 
-    return false
+    const session = { deviceId, server, registered }
+    await this.applyGrants(session)
+
+    await server.connect(transport)
+
+    const onclose = transport.onclose
+    transport.onclose = () => {
+      onclose?.()
+      if (this.sessions.get(deviceId) === session) {
+        this.sessions.delete(deviceId)
+      }
+    }
+
+    this.sessions.set(deviceId, session)
+    console.log(`[${this.service.id}] New MCP session for ${deviceId}`)
   }
 
-
-  async sendResult(event, requestId, result) {
-    await this.sept.send(
-      "mcp.response",
+  async callTool(tool, deviceId, arguments_) {
+    console.log(
+      `[${this.service.id}] Calling ${tool.name}`,
       {
-        requestId,
-        result,
+        senderDeviceId: deviceId,
+        arguments: arguments_,
       },
-      [event.senderDeviceId],
+    );
+
+    return await this.mcpClient.callTool({
+      name: tool.name,
+      arguments: arguments_,
+    });
+  }
+
+  async allowedTools(deviceId) {
+    const gatewayDeviceId = await this.sept.getDeviceId();
+    const graph = await this.sept.getACL();
+
+    const relation = graph.find(edge =>
+      edge.srcDeviceId === deviceId &&
+      edge.dstDeviceId === gatewayDeviceId
+    );
+
+    const allowedEventTypes = relation?.policy?.allowedEventTypes ?? [];
+    return new Set(
+      this.tools
+        .map(tool => tool.name)
+        .filter(name => allowedEventTypes.includes(toolCallEvent(name))),
+    )
+  }
+
+  // Enabling or disabling a tool on a connected McpServer sends
+  // notifications/tools/list_changed to the client.
+  async applyGrants(session) {
+    const allowed = await this.allowedTools(session.deviceId)
+    for (const [name, tool] of session.registered) {
+      if (allowed.has(name) && !tool.enabled) {
+        tool.enable()
+      } else if (!allowed.has(name) && tool.enabled) {
+        tool.disable()
+      }
+    }
+    console.log(
+      `[${this.service.id}] Tools allowed for ${session.deviceId}:`,
+      [...allowed],
     );
   }
 
-
-  async sendError(event, requestId, error) {
-    const message = error instanceof Error
-      ? error.message
-      : String(error);
-
-
-    await this.sept.send(
-      "mcp.response",
-      {
-        requestId,
-        error: {
-          message,
-        },
-      },
-      [event.senderDeviceId],
-    );
+  async applyGrantsToSessions() {
+    for (const session of this.sessions.values()) {
+      await this.applyGrants(session)
+    }
   }
 
 
@@ -370,4 +291,27 @@ export class SeptMcpServer extends BaseCommand {
       }
     }
   }
+}
+
+
+function toolConfig(tool) {
+  const config = {
+    description: tool.description ?? "",
+    inputSchema: fromJsonSchema(
+      tool.inputSchema ?? {
+        type: "object",
+        properties: {},
+      }
+    ),
+  }
+  if (tool.title) {
+    config.title = tool.title
+  }
+  if (tool.annotations) {
+    config.annotations = tool.annotations
+  }
+  if (tool.outputSchema) {
+    config.outputSchema = fromJsonSchema(tool.outputSchema)
+  }
+  return config
 }

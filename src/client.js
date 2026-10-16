@@ -1,4 +1,4 @@
-import crypto from "node:crypto"
+import { Client } from "@modelcontextprotocol/client"
 import {
   createMcpHandler,
   fromJsonSchema,
@@ -8,6 +8,7 @@ import { toNodeHandler } from "@modelcontextprotocol/node"
 import { createMcpExpressApp } from "@modelcontextprotocol/express"
 import { BaseCommand } from "./base-command.js"
 import { pairIfNeeded } from "./common.js"
+import { RPC_EVENT, SeptMcpChannel, toolCallEvent } from "./transport.js"
 
 export class SeptMcpClient extends BaseCommand {
   constructor(program) {
@@ -22,7 +23,9 @@ export class SeptMcpClient extends BaseCommand {
 
     this.gatewayDeviceId = null
     this.allowedEventTypes = []
-    this.pending = new Map()
+    // MCP client session with the server bridge, over SEPT
+    this.remote = null
+    this.remoteConnecting = null
 
     this.mcpHandler = null
     this.httpServer = null
@@ -41,7 +44,9 @@ export class SeptMcpClient extends BaseCommand {
       console.log("Pairing done")
     }
     console.log(`NetworkID: ${networkId}`)
-    this.registerResponseHandler()
+    this.channel = new SeptMcpChannel(this.sept, {
+      logPrefix: `[${this.service.id}] `,
+    })
 
     this.sept.on("policy.update", ({ policies }) =>
       this.onPolicyUpdate(policies)
@@ -136,8 +141,8 @@ export class SeptMcpClient extends BaseCommand {
       const allowedEventTypes = edge.policy?.allowedEventTypes ?? []
 
       return allowedEventTypes.some(type =>
-        type === "mcp.tools.list" ||
-        type.startsWith("mcp.tools.call.")
+        type === RPC_EVENT ||
+        type.startsWith(toolCallEvent(""))
       )
     })
 
@@ -159,91 +164,66 @@ export class SeptMcpClient extends BaseCommand {
     }
   }
 
-  registerResponseHandler() {
-    this.sept.register("mcp.response", async event => {
-      if (event.senderDeviceId !== this.gatewayDeviceId) {
-        console.warn(
-          `[${this.service.id}] Ignoring mcp.response from`,
-          event.senderDeviceId
-        )
-        return
-      }
-
-      const {
-        requestId,
-        result,
-        error,
-        rpc,
-      } = event.payload
-
-      const request = this.pending.get(requestId)
-
-      if (!request) {
-        console.warn(`[${this.service.id}] Unknown requestId: ${requestId}`)
-        return
-      }
-
-      clearTimeout(request.timeout)
-      this.pending.delete(requestId)
-
-      if (error) {
-        request.reject(
-          new Error(error.message ?? "Unknown MCP gateway error")
-        )
-        return
-      }
-
-      if (rpc?.error) {
-        request.reject(
-          new Error(rpc.error.message ?? "MCP JSON-RPC error")
-        )
-        return
-      }
-
-      request.resolve(result ?? rpc?.result)
-    })
-  }
-
-  async request(eventType, payload = {}) {
-    const requestId = crypto.randomUUID()
-
-    const responsePromise = new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pending.delete(requestId)
-        reject(new Error(`Timeout waiting for ${eventType}`))
-      }, this.service.requestTimeoutMs)
-
-      this.pending.set(requestId, {
-        resolve,
-        reject,
-        timeout,
-      })
-    })
-
-    try {
-      await this.sept.send(
-        eventType,
-        {
-          requestId,
-          // Lets the server drop the request once we've stopped waiting
-          // for it (e.g. delivered after the gateway was offline).
-          timeoutMs: this.service.requestTimeoutMs,
-          ...payload,
-        },
-        [this.gatewayDeviceId]
-      )
-    } catch (error) {
-      const request = this.pending.get(requestId)
-
-      if (request) {
-        clearTimeout(request.timeout)
-        this.pending.delete(requestId)
-      }
-
-      throw error
+  // Connects (once) an MCP client to the server bridge over SEPT.
+  async getRemote() {
+    if (this.remote) {
+      return this.remote
     }
 
-    return responsePromise
+    if (this.remoteConnecting === null) {
+      this.remoteConnecting = (async () => {
+        const client = new Client(
+          {
+            name: `sept-ag-${this.service.id}`,
+            version: "0.1.0",
+          },
+          {
+            versionNegotiation: {
+              mode: "auto",
+            },
+          },
+        )
+
+        const transport = this.channel.connect(this.gatewayDeviceId, {
+          requestTimeoutMs: this.service.requestTimeoutMs,
+        })
+
+        try {
+          await client.connect(transport, {
+            timeout: this.service.requestTimeoutMs,
+          })
+        } catch (error) {
+          await transport.close()
+          throw error
+        }
+
+        const onclose = transport.onclose
+        transport.onclose = () => {
+          onclose?.()
+          if (this.remote === client) {
+            this.remote = null
+          }
+        }
+
+        this.remote = client
+        return client
+      })().finally(() => {
+        this.remoteConnecting = null
+      })
+    }
+
+    return this.remoteConnecting
+  }
+
+  async remoteRequest(what, fn) {
+    try {
+      return await fn(await this.getRemote())
+    } catch (error) {
+      if (error?.code === "REQUEST_TIMEOUT" || /timed out/i.test(error?.message ?? "")) {
+        throw new Error(`Timeout waiting for ${what}`)
+      }
+      throw error
+    }
   }
 
   async onPolicyUpdate(policies = []) {
@@ -276,7 +256,13 @@ export class SeptMcpClient extends BaseCommand {
     if (this.toolsRequest === null) {
       const generation = this.toolsGeneration
 
-      const request = this.request("mcp.tools.list")
+      const request = this.remoteRequest("tools/list", remote =>
+        remote.listTools(undefined, {
+          timeout: this.service.requestTimeoutMs,
+          // Tool permissions can change at any time: never serve a cached list
+          cacheMode: "bypass",
+        })
+      )
         .then(discovery => {
           const tools = discovery?.tools ?? []
           if (generation === this.toolsGeneration) {
@@ -346,11 +332,16 @@ export class SeptMcpClient extends BaseCommand {
             arguments_
           )
 
-          return this.request(
-            `mcp.tools.call.${tool.name}`,
-            {
-              arguments: arguments_,
-            }
+          return this.remoteRequest(toolCallEvent(tool.name), remote =>
+            remote.callTool(
+              {
+                name: tool.name,
+                arguments: arguments_,
+              },
+              {
+                timeout: this.service.requestTimeoutMs,
+              }
+            )
           )
         }
       )
@@ -371,15 +362,9 @@ export class SeptMcpClient extends BaseCommand {
 
     console.log(`[${this.service.id}] Stopping...`)
 
-    for (const [requestId, request] of this.pending) {
-      clearTimeout(request.timeout)
-
-      request.reject(
-        new Error(`Proxy stopped while waiting for ${requestId}`)
-      )
+    if (this.remote) {
+      await this.remote.close()
     }
-
-    this.pending.clear()
 
     if (this.httpServer) {
       await new Promise((resolve, reject) => {
